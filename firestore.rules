@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- User Rules ---
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if false;
+      
+      // Initial registration (minimal fields)
+      allow create: if isOwner(userId) && 
+                      incoming().keys().hasAll(['uid', 'email', 'role', 'onboarded']) &&
+                      incoming().uid == request.auth.uid &&
+                      incoming().role in ['patient', 'doctor'] &&
+                      incoming().onboarded == false;
+      
+      // Onboarding and sharing toggle
+      allow update: if isOwner(userId) && (
+        // Action: Complete Onboarding
+        (!existing().onboarded && incoming().onboarded == true && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'address', 'age', 'gender', 'bloodGroup', 'degree', 'onboarded', 'isSharingEnabled', 'updatedAt'])) ||
+        // Action: Toggle Privacy
+        (existing().onboarded && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['isSharingEnabled', 'updatedAt']))
+      );
+    }
+
+    // --- Record Rules ---
+    match /records/{recordId} {
+      function canDoctorRead(patientId) {
+        return get(/databases/$(database)/documents/users/$(patientId)).data.isSharingEnabled == true;
+      }
+
+      // Patients see their own records, Doctors see shared records
+      allow get: if isSignedIn() && (isOwner(existing().patientId) || canDoctorRead(existing().patientId));
+      
+      // Query enforcement for listing
+      allow list: if isSignedIn() && (
+        resource.data.patientId == request.auth.uid || 
+        get(/databases/$(database)/documents/users/$(resource.data.patientId)).data.isSharingEnabled == true
+      );
+
+      allow create: if isSignedIn() && 
+                      isOwner(incoming().patientId) && 
+                      incoming().keys().hasAll(['patientId', 'fileURL', 'type', 'createdAt']) &&
+                      incoming().type in ['prescription', 'report'] &&
+                      incoming().createdAt == request.time;
+      
+      allow update, delete: if false; 
+    }
+  }
+}
